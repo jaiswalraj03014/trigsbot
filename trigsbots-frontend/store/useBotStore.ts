@@ -3,11 +3,10 @@ import { create } from 'zustand';
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  thoughts?: string[]; // <-- NEW: Added to support AI terminal thoughts
+  reasoning?: string; // <-- Changed to a single string for DeepSeek style
 }
 
 interface BotState {
-  // Agent Blueprint
   agent_name: string;
   system_prompt: string;
   trigger_type: string;
@@ -15,17 +14,16 @@ interface BotState {
   drawdown_limit_pct: number;
   withdrawal_address: string;
   
-  // AI Conversation State
   status: string;
   chatHistory: ChatMessage[];
   
-  // Actions
   applyBlueprint: (data: Partial<BotState>) => void;
   addMessage: (msg: ChatMessage) => void;
   setStatus: (status: string) => void;
+  getBlueprint: () => any; // <-- Added a helper to get current state
 }
 
-export const useBotStore = create<BotState>((set) => ({
+export const useBotStore = create<BotState>((set, get) => ({
   agent_name: '',
   system_prompt: '',
   trigger_type: '',
@@ -41,4 +39,17 @@ export const useBotStore = create<BotState>((set) => ({
   applyBlueprint: (data) => set((state) => ({ ...state, ...data })),
   addMessage: (msg) => set((state) => ({ chatHistory: [...state.chatHistory, msg] })),
   setStatus: (status) => set({ status }),
+  
+  // Helper to grab the current state of the blueprint
+  getBlueprint: () => {
+    const state = get();
+    return {
+      agent_name: state.agent_name,
+      system_prompt: state.system_prompt,
+      trigger_type: state.trigger_type,
+      max_spend_per_tx: state.max_spend_per_tx,
+      drawdown_limit_pct: state.drawdown_limit_pct,
+      withdrawal_address: state.withdrawal_address,
+    };
+  }
 }));

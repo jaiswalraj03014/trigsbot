@@ -1,11 +1,13 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { useBotStore } from '@/store/useBotStore'; // <-- Make sure path is correct
+import { useBotStore } from '@/store/useBotStore';
 
 export default function ChatBuilder() {
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [liveReasoning, setLiveReasoning] = useState(''); // Tracks the live typing
+  
   const [greeting, setGreeting] = useState("What strategy shall we automate today?");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -37,31 +39,23 @@ export default function ChatBuilder() {
 
     const validExtensions = ['.md', '.txt', '.csv', '.json', '.pdf', '.doc', '.docx'];
     const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-    const isValid = validExtensions.includes(fileExt);
-
-    if (!isValid) {
-      alert("Invalid file type. Please upload a document (.md, .txt, .pdf, .docx). Media files are not allowed.");
-      e.target.value = ''; 
-      return;
+    if (!validExtensions.includes(fileExt)) {
+      alert("Invalid file type."); e.target.value = ''; return;
     }
 
     const plainTextExtensions = ['.md', '.txt', '.csv', '.json'];
-    
     if (plainTextExtensions.includes(fileExt)) {
       const reader = new FileReader();
       reader.onload = async (event) => {
         const fileContent = event.target?.result as string;
-        const formattedUpload = `[Document Uploaded: ${file.name}]\n\n${fileContent}\n`;
-        setInput(prev => prev + (prev ? '\n\n' : '') + formattedUpload);
+        setInput(prev => prev + (prev ? '\n\n' : '') + `[Document Uploaded: ${file.name}]\n\n${fileContent}\n`);
         textareaRef.current?.focus();
       };
       reader.readAsText(file);
     } else {
-      const formattedUpload = `[Document Attached: ${file.name}]\n*(System Note: To fully extract text from PDF/DOCX, a backend parser will be required in production)*\n`;
-      setInput(prev => prev + (prev ? '\n\n' : '') + formattedUpload);
+      setInput(prev => prev + (prev ? '\n\n' : '') + `[Document Attached: ${file.name}]\n*(System Note: Needs backend parser)*\n`);
       textareaRef.current?.focus();
     }
-    
     e.target.value = ''; 
   };
 
@@ -72,41 +66,85 @@ export default function ChatBuilder() {
     addMessage(userMsg);
     setInput('');
     setIsThinking(true);
+    setLiveReasoning(''); // Reset stream string
     
     try {
+      const currentState = useBotStore.getState();
+      const current_blueprint = {
+        agent_name: currentState.agent_name,
+        system_prompt: currentState.system_prompt,
+        trigger_type: currentState.trigger_type,
+        max_spend_per_tx: currentState.max_spend_per_tx,
+        drawdown_limit_pct: currentState.drawdown_limit_pct,
+        withdrawal_address: currentState.withdrawal_address,
+      };
+
       const response = await fetch('http://localhost:3001/chat-builder', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chatHistory: [...chatHistory, userMsg] })
+        body: JSON.stringify({ 
+          chat_history: [...chatHistory, userMsg],
+          current_blueprint: current_blueprint 
+        })
       });
 
-      const data = await response.json();
-      
-      if (data && data.message_to_user) {
-        // NEW: We are passing the AI's thoughts into the store!
-        addMessage({ 
-          role: 'assistant', 
-          content: data.message_to_user,
-          thoughts: data.thought_process
-        });
-        applyBlueprint(data.current_blueprint);
-        setStatus(data.status);
-      } else {
-        addMessage({ role: 'assistant', content: "I encountered an error compiling that request." });
+      if (!response.body) throw new Error("No readable stream");
+
+      // Set up the Stream Reader
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let isDone = false;
+      let accumulatedRawJSON = "";
+
+      while (!isDone) {
+        const { value, done } = await reader.read();
+        if (done) { isDone = true; break; }
+        
+        const chunk = decoder.decode(value, { stream: true });
+        const events = chunk.split('\n\n');
+
+        for (const ev of events) {
+          if (ev.startsWith('event: token')) {
+             const dataStr = ev.replace('event: token\ndata: ', '').replace(/\\n/g, '\n');
+             accumulatedRawJSON += dataStr;
+             
+             // Regex Magic: Extract only the reasoning string from the raw JSON as it streams
+             const match = accumulatedRawJSON.match(/"reasoning"\s*:\s*"([^"]*)/);
+             if (match && match[1]) {
+                setLiveReasoning(match[1]); // This animates the UI instantly!
+             }
+          }
+          if (ev.startsWith('event: complete')) {
+             const finalDataStr = ev.replace('event: complete\ndata: ', '');
+             const data = JSON.parse(finalDataStr);
+             
+             // Stream is done, save the final complete message to state
+             addMessage({ 
+                role: 'assistant', 
+                content: data.message_to_user,
+                reasoning: data.reasoning,
+                thoughts: data.thought_process // Attach the terminal logs
+             });
+             applyBlueprint(data.current_blueprint);
+             setStatus(data.status);
+             setIsThinking(false);
+             setLiveReasoning('');
+          }
+          if (ev.startsWith('event: error')) {
+             addMessage({ role: 'assistant', content: "Stream interrupted." });
+             setIsThinking(false);
+          }
+        }
       }
     } catch (error) {
       console.error(error);
-      addMessage({ role: 'assistant', content: "System offline. Cannot reach Trigsbots Builder API." });
-    } finally {
+      addMessage({ role: 'assistant', content: "System offline." });
       setIsThinking(false);
     }
   };
 
   const suggestionPills = [
-    "Arbitrage Sniper",
-    "Stablecoin Yield Farmer",
-    "Liquidator Bot",
-    "DCA Accumulator"
+    "Arbitrage Sniper", "Stablecoin Yield Farmer", "Liquidator Bot", "DCA Accumulator"
   ];
 
   return (
@@ -114,65 +152,99 @@ export default function ChatBuilder() {
       
       {!isEmptyState && (
         <div className="flex-grow overflow-y-auto flex flex-col gap-6 pb-6 px-2 pt-4 scroll-smooth">
-          {chatHistory.slice(1).map((msg, idx) => (
-            <div key={idx} className={`flex flex-col max-w-[85%] ${msg.role === 'user' ? 'self-end items-end' : 'self-start items-start'}`}>
-              
-              {/* --- NEW: THE AI TERMINAL LOGS --- */}
-              {msg.thoughts && msg.thoughts.length > 0 && (
-                <div className="mb-2 px-4 py-3 bg-[#1A1816] rounded-xl border border-[#2D2A26] w-full shadow-inner font-mono text-[13px] text-emerald-400/80 flex flex-col gap-1.5">
-                  <div className="text-[#A09B90] mb-1 flex items-center gap-2 text-xs uppercase tracking-wider font-semibold">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M4 17l6-6-6-6" />
-                      <path d="M12 19h8" />
-                    </svg>
-                    Agent Runtime Logs
-                  </div>
-                  {msg.thoughts.map((thought, tIdx) => (
-                    <span key={tIdx} className="opacity-90 leading-tight">
-                      {thought.includes('Missing') ? (
-                         <span className="text-amber-400">[WARN] {thought}</span>
-                      ) : (
-                         <span className="text-emerald-400">[OK] {thought}</span>
-                      )}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {/* ---------------------------------- */}
+          {chatHistory.slice(1).map((msg, idx, arr) => {
+            const isLastMessage = idx === arr.length - 1;
 
-              <div className={`px-5 py-3.5 rounded-2xl text-[15px] leading-relaxed shadow-sm whitespace-pre-wrap ${
-                msg.role === 'user' 
-                  ? 'bg-[#EAE6DF] text-[#2D2A26] rounded-br-sm font-medium border border-[#DCD6CC]' 
-                  : 'bg-white text-[#2D2A26] rounded-bl-sm border border-[#E5E0D8]'
-              }`}>
-                {msg.content}
+            return (
+              <div key={idx} className={`flex flex-col max-w-[85%] ${msg.role === 'user' ? 'self-end items-end' : 'self-start items-start'}`}>
+                
+                {/* COMPLETED DEEPSEEK CHAIN OF THOUGHT */}
+                {msg.reasoning && (
+                  <details className="mb-2 group w-full">
+                    <summary className="text-[13px] text-[#A09B90] cursor-pointer list-none flex items-center gap-2 hover:text-[#2D2A26] transition-colors select-none">
+                      <svg className="w-3.5 h-3.5 transition-transform duration-200 group-open:rotate-90" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                      </svg>
+                      Thinking Process
+                    </summary>
+                    <div className="pl-5 pt-2 pb-1 text-[13px] text-[#7A756D] border-l-2 border-[#E5E0D8] ml-[7px] mt-1 whitespace-pre-wrap leading-relaxed animate-in fade-in duration-300">
+                      {msg.reasoning}
+                    </div>
+                  </details>
+                )}
+
+                {/* THE TERMINAL LOGS */}
+                {msg.thoughts && msg.thoughts.length > 0 && (
+                  <div className="mb-2 px-4 py-3 bg-[#1A1816] rounded-xl border border-[#2D2A26] w-full shadow-inner font-mono text-[13px] text-emerald-400/80 flex flex-col gap-1.5">
+                    <div className="text-[#A09B90] mb-1 flex items-center gap-2 text-xs uppercase tracking-wider font-semibold">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M4 17l6-6-6-6" />
+                        <path d="M12 19h8" />
+                      </svg>
+                      Agent Runtime Logs
+                    </div>
+                    {msg.thoughts.map((thought, tIdx) => (
+                      <span key={tIdx} className="opacity-90 leading-tight">
+                        {thought.toLowerCase().includes('missing') ? (
+                           <span className="text-amber-400">[WARN] {thought}</span>
+                        ) : (
+                           <span className="text-emerald-400">[OK] {thought}</span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* NORMAL CHAT BUBBLE */}
+                <div className={`px-5 py-3.5 rounded-2xl text-[15px] leading-relaxed shadow-sm whitespace-pre-wrap ${
+                  msg.role === 'user' 
+                    ? 'bg-[#EAE6DF] text-[#2D2A26] rounded-br-sm font-medium border border-[#DCD6CC]' 
+                    : 'bg-white text-[#2D2A26] rounded-bl-sm border border-[#E5E0D8]'
+                }`}>
+                  {msg.content}
+                </div>
+
+                {/* INLINE INPUT BOX */}
+                {isLastMessage && msg.role === 'assistant' && status === 'gathering' && !isThinking && (
+                  <div 
+                    onClick={() => textareaRef.current?.focus()}
+                    className="mt-3 w-full p-3.5 border-2 border-dashed border-[#DCD6CC] rounded-xl text-[#A09B90] text-[14px] cursor-text hover:bg-[#F9F8F6] hover:border-[#C4BFB5] hover:text-[#7A756D] transition-all flex items-center gap-3 shadow-sm animate-in fade-in zoom-in-95 duration-300"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    Click here to provide the missing information...
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
           
+          {/* --- NEW: LIVE STREAMING UI --- */}
           {isThinking && (
-            <div className="self-start px-5 py-4 rounded-2xl bg-white text-[#A09B90] text-sm flex gap-1 rounded-bl-sm border border-[#E5E0D8] shadow-sm">
-              <span className="animate-bounce">.</span><span className="animate-bounce delay-100">.</span><span className="animate-bounce delay-200">.</span>
+            <div className="flex flex-col self-start max-w-[85%] animate-in fade-in duration-300">
+              <details open className="mb-2 group w-full">
+                <summary className="text-[13px] text-[#A09B90] cursor-pointer list-none flex items-center gap-2 select-none">
+                  <svg className="w-3.5 h-3.5 rotate-90" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                  Thinking Process...
+                </summary>
+                <div className="pl-5 pt-2 pb-1 text-[13px] text-[#7A756D] border-l-2 border-[#E5E0D8] ml-[7px] mt-1 whitespace-pre-wrap leading-relaxed">
+                  {liveReasoning || <span className="animate-pulse">Analyzing logic...</span>}
+                  <span className="inline-block w-1.5 h-3.5 ml-1 bg-[#A09B90] animate-pulse"></span>
+                </div>
+              </details>
             </div>
           )}
+          {/* ------------------------------ */}
         </div>
       )}
 
       {isEmptyState && (
         <div className="flex flex-col items-center justify-center flex-grow pt-10 pb-12 animate-in fade-in duration-700">
           <div className="flex items-center justify-center mb-16">
-            <img 
-              src="/trigsbot.png" 
-              alt="Trigsbot Logo" 
-              className="h-24 w-auto object-contain invert relative z-10" 
-            />
-            <img 
-              src="/trigsbot-text.png" 
-              alt="Trigsbot Text" 
-              className="h-20 w-auto object-contain invert -ml-8 relative z-0" 
-            />
+            <img src="/trigsbot.png" alt="Trigsbot Logo" className="h-24 w-auto object-contain relative z-10" />
+            <img src="/trigsbot-text.png" alt="Trigsbot Text" className="h-20 w-auto object-contain invert -ml-8 relative z-0" />
           </div>
-
           <h2 className="text-[2.75rem] leading-[1.15] font-serif text-[#2D2A26] tracking-tight text-center max-w-2xl">
             {greeting}
           </h2>
@@ -205,32 +277,12 @@ export default function ChatBuilder() {
           />
           
           <div className="flex justify-between items-center px-2 pb-1.5 pt-1">
-            
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleFileUpload} 
-              accept=".md,.txt,.csv,.json,.pdf,.doc,.docx" 
-              className="hidden" 
-            />
-
-            <button 
-              onClick={() => fileInputRef.current?.click()} 
-              className="text-[#A09B90] hover:text-[#2D2A26] transition-colors py-1.5 px-2.5 rounded-lg hover:bg-[#F4F2EC] flex items-center gap-2 text-sm font-medium"
-            >
+            <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".md,.txt,.csv,.json,.pdf,.doc,.docx" className="hidden" />
+            <button onClick={() => fileInputRef.current?.click()} className="text-[#A09B90] hover:text-[#2D2A26] transition-colors py-1.5 px-2.5 rounded-lg hover:bg-[#F4F2EC] flex items-center gap-2 text-sm font-medium">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
               <span className="hidden sm:inline">Upload Ruleset</span>
             </button>
-
-            <button 
-              onClick={() => handleSend(input)}
-              disabled={isThinking || !input.trim()}
-              className={`p-2 rounded-xl transition-all flex items-center justify-center ${
-                isThinking || !input.trim() 
-                  ? 'bg-[#F4F2EC] text-[#C4BFB5] cursor-not-allowed' 
-                  : 'bg-[#2D2A26] text-white hover:bg-[#1A1816] shadow-sm'
-              }`}
-            >
+            <button onClick={() => handleSend(input)} disabled={isThinking || !input.trim()} className={`p-2 rounded-xl transition-all flex items-center justify-center ${isThinking || !input.trim() ? 'bg-[#F4F2EC] text-[#C4BFB5] cursor-not-allowed' : 'bg-[#2D2A26] text-white hover:bg-[#1A1816] shadow-sm'}`}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
             </button>
           </div>
@@ -239,17 +291,10 @@ export default function ChatBuilder() {
         {isEmptyState && (
           <div className="flex flex-wrap justify-center gap-2.5 mt-8 max-w-2xl animate-in fade-in slide-in-from-bottom-2 duration-700 delay-150">
             {suggestionPills.map((pill, i) => (
-              <button 
-                key={i}
-                onClick={() => setInput(`I want to build a ${pill} that...`)}
-                className="px-4 py-2 rounded-full bg-white border border-[#E5E0D8] text-[#7A756D] text-[13px] font-medium hover:text-[#2D2A26] hover:border-[#D0C8B8] hover:bg-[#F4F2EC] transition-all shadow-sm"
-              >
-                {pill}
-              </button>
+              <button key={i} onClick={() => setInput(`I want to build a ${pill} that...`)} className="px-4 py-2 rounded-full bg-white border border-[#E5E0D8] text-[#7A756D] text-[13px] font-medium hover:text-[#2D2A26] hover:border-[#D0C8B8] hover:bg-[#F4F2EC] transition-all shadow-sm">{pill}</button>
             ))}
           </div>
         )}
-
       </div>
     </div>
   );
