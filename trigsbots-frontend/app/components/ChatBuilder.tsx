@@ -122,8 +122,7 @@ export default function ChatBuilder() {
              addMessage({ 
                 role: 'assistant', 
                 content: data.message_to_user,
-                reasoning: data.reasoning,
-                thoughts: data.thought_process // Attach the terminal logs
+                reasoning: data.reasoning
              });
              applyBlueprint(data.current_blueprint);
              setStatus(data.status);
@@ -173,28 +172,6 @@ export default function ChatBuilder() {
                   </details>
                 )}
 
-                {/* THE TERMINAL LOGS */}
-                {msg.thoughts && msg.thoughts.length > 0 && (
-                  <div className="mb-2 px-4 py-3 bg-[#1A1816] rounded-xl border border-[#2D2A26] w-full shadow-inner font-mono text-[13px] text-emerald-400/80 flex flex-col gap-1.5">
-                    <div className="text-[#A09B90] mb-1 flex items-center gap-2 text-xs uppercase tracking-wider font-semibold">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M4 17l6-6-6-6" />
-                        <path d="M12 19h8" />
-                      </svg>
-                      Agent Runtime Logs
-                    </div>
-                    {msg.thoughts.map((thought, tIdx) => (
-                      <span key={tIdx} className="opacity-90 leading-tight">
-                        {thought.toLowerCase().includes('missing') ? (
-                           <span className="text-amber-400">[WARN] {thought}</span>
-                        ) : (
-                           <span className="text-emerald-400">[OK] {thought}</span>
-                        )}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
                 {/* NORMAL CHAT BUBBLE */}
                 <div className={`px-5 py-3.5 rounded-2xl text-[15px] leading-relaxed shadow-sm whitespace-pre-wrap ${
                   msg.role === 'user' 
@@ -218,7 +195,7 @@ export default function ChatBuilder() {
             );
           })}
           
-          {/* --- NEW: LIVE STREAMING UI --- */}
+          {/* --- LIVE STREAMING UI --- */}
           {isThinking && (
             <div className="flex flex-col self-start max-w-[85%] animate-in fade-in duration-300">
               <details open className="mb-2 group w-full">

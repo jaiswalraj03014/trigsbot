@@ -80,7 +80,7 @@ func main() {
 			stream, err := aiClient.CreateChatCompletionStream(
 				context.Background(),
 				openai.ChatCompletionRequest{
-					Model: "qwen3:4b",
+					Model: "qwen3:8b",
 					Messages: messages,
 					ResponseFormat: &openai.ChatCompletionResponseFormat{
 						Type: openai.ChatCompletionResponseFormatTypeJSONObject,
